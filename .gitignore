@@ -1,0 +1,92 @@
+# Environment variables (contains sensitive API keys)
+.env
+.env.local
+.env.*.local
+
+# Audio recordings
+recordings/
+*.mp3
+*.wav
+*.m4a
+*.ogg
+
+# Transcription output files
+transcriptions/
+*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+myenv/
+.venv/
+virtualenv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Database files (if any)
+*.db
+*.sqlite
+*.sqlite3
+
+# ML Models (large files)
+vosk-model-*/
+*.model
+*.bin
+
