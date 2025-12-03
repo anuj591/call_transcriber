@@ -4,9 +4,13 @@ import json
 from datetime import datetime, timedelta
 import time
 from pathlib import Path
-import base64
 from dotenv import load_dotenv
+import asyncio
+from deepgram import Deepgram
+
 load_dotenv()
+
+
 class ExotelCallRecorder:
     def __init__(self):
         # Load credentials from environment variables
@@ -15,8 +19,8 @@ class ExotelCallRecorder:
         self.sid = os.getenv('EXOTEL_SID')
         self.subdomain = os.getenv('EXOTEL_SUBDOMAIN', 'api.exotel.com')
         
-        # AssemblyAI API for transcription
-        self.assemblyai_api_key = os.getenv('ASSEMBLYAI_API_KEY')
+        # Deepgram API key
+        self.deepgram_api_key = os.getenv('DEEPGRAM_API_KEY', '507bdfd052088ccd9f3422aa295066621b29209a')
         
         # Create directories for storage
         self.recordings_dir = Path('recordings')
@@ -49,6 +53,19 @@ class ExotelCallRecorder:
             print(f"Error fetching calls: {e}")
             return []
     
+    def get_call_details(self, call_sid):
+        """Get detailed information about a specific call"""
+        url = f"{self.base_url}/Calls/{call_sid}.json"
+        
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            data = response.json()
+            return data.get('Call', {})
+        except Exception as e:
+            print(f"Error fetching call details for {call_sid}: {e}")
+            return {}
+    
     def download_recording(self, call_sid, recording_url):
         """Download call recording audio file"""
         try:
@@ -72,183 +89,125 @@ class ExotelCallRecorder:
             print(f"Error downloading recording {call_sid}: {e}")
             return None
     
-    def transcribe_audio_whisper(self, audio_filepath):
-        """Transcribe audio using AssemblyAI API (supports Hindi + English)"""
+    async def transcribe_audio_deepgram(self, audio_filepath, call_sid):
+        """Transcribe audio using Deepgram API"""
         try:
-            # Step 1: Upload audio file to AssemblyAI
-            upload_url = "https://api.assemblyai.com/v2/upload"
-            headers = {
-                "authorization": self.assemblyai_api_key
-            }
+            # Get file name
+            file_name = os.path.splitext(os.path.basename(audio_filepath))[0]
             
-            with open(audio_filepath, 'rb') as audio_file:
-                response = requests.post(upload_url, headers=headers, files={'file': audio_file})
-                response.raise_for_status()
-                upload_result = response.json()
-                audio_url = upload_result.get('upload_url')
+            # Generate timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             
-            if not audio_url:
-                print("Error: Failed to upload audio file")
-                return None
+            # Create output filename
+            output_filename = f"{file_name}_{timestamp}.txt"
+            output_path = os.path.join(self.transcriptions_dir, output_filename)
             
-            # Step 2: Submit transcription request
-            transcript_url = "https://api.assemblyai.com/v2/transcript"
-            transcript_headers = {
-                "authorization": self.assemblyai_api_key,
-                "content-type": "application/json"
-            }
+            # Initialize client
+            deepgram = Deepgram(self.deepgram_api_key)
             
-            transcript_data = {
-                "audio_url": audio_url,
-                "language_code": "hi",  # Hindi, but auto-detects English too
-                "speaker_labels": True  # Enable speaker diarization
-            }
-            
-            response = requests.post(transcript_url, json=transcript_data, headers=transcript_headers)
-            response.raise_for_status()
-            transcript_result = response.json()
-            transcript_id = transcript_result.get('id')
-            
-            if not transcript_id:
-                print("Error: Failed to submit transcription request")
-                return None
-            
-            # Step 3: Poll for transcription completion
-            polling_url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
-            max_attempts = 60  # 5 minutes max (5 seconds * 60)
-            attempt = 0
-            
-            while attempt < max_attempts:
-                response = requests.get(polling_url, headers=headers)
-                response.raise_for_status()
-                status_result = response.json()
+            # Read audio file
+            with open(audio_filepath, 'rb') as audio:
+                source = {'buffer': audio, 'mimetype': 'audio/mp3'}
                 
-                status = status_result.get('status')
+                # Configure options
+                options = {
+                    'punctuate': True,
+                    'diarize': True,
+                    'language': 'hi'
+                }
                 
-                if status == 'completed':
-                    # Get the transcript text
-                    transcript_text = status_result.get('text', '')
+                # Transcribe
+                print(f"🎙️  Transcribing: {audio_filepath}")
+                response = await deepgram.transcription.prerecorded(source, options)
+                
+                # Print results
+                transcript = response['results']['channels'][0]['alternatives'][0]['transcript']
+                print("\nFull Transcription:")
+                print(transcript)
+                print("\n" + "="*60)
+                
+                # Open file for writing
+                with open(output_path, 'w', encoding='utf-8') as output_file:
+                    # Write header
+                    output_file.write(f"FILE: {audio_filepath}\n")
+                    output_file.write(f"CALL SID: {call_sid}\n")
+                    output_file.write(f"DATE: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    output_file.write("="*60 + "\n\n")
                     
-                    # If speaker labels are available, format with speakers
-                    if status_result.get('utterances'):
-                        formatted_text = ""
-                        for utterance in status_result.get('utterances', []):
-                            speaker_value = utterance.get('speaker', 0)
+                    # Write full transcript
+                    output_file.write("FULL TRANSCRIPTION:\n")
+                    output_file.write("-"*60 + "\n")
+                    output_file.write(transcript + "\n\n")
+                    
+                    # Speaker diarization
+                    words = response['results']['channels'][0]['alternatives'][0]['words']
+                    if words:
+                        output_file.write("SPEAKER DIARIZATION:\n")
+                        output_file.write("-"*60 + "\n\n")
+                        
+                        print("Speaker Diarization:\n")
+                        current_speaker = None
+                        current_text = []
+                        
+                        for word in words:
+                            speaker = word.get('speaker', 'Unknown')
+                            word_text = word.get('punctuated_word', word.get('word', ''))
                             
-                            # Handle both string ('A', 'B') and numeric (0, 1) speaker labels
-                            if isinstance(speaker_value, str):
-                                # Already a letter like 'A', 'B', 'C'
-                                speaker = f"Person {speaker_value}"
+                            if speaker != current_speaker:
+                                if current_speaker is not None:
+                                    line = f"Speaker {current_speaker}: {' '.join(current_text)}"
+                                    print(line)
+                                    output_file.write(line + "\n\n")
+                                current_speaker = speaker
+                                current_text = [word_text]
                             else:
-                                # Numeric value, convert to letter
-                                speaker_num = int(speaker_value)
-                                speaker = f"Person {chr(65 + speaker_num)}"  # A, B, C...
-                            
-                            text = utterance.get('text', '')
-                            formatted_text += f"{speaker}: {text}\n\n"
-                        return formatted_text.strip()
-                    
-                    return transcript_text
-                    
-                elif status == 'error':
-                    error_msg = status_result.get('error', 'Unknown error')
-                    print(f"Transcription error: {error_msg}")
-                    return None
+                                current_text.append(word_text)
+                        
+                        # Print and write last speaker
+                        if current_speaker is not None:
+                            line = f"Speaker {current_speaker}: {' '.join(current_text)}"
+                            print(line)
+                            output_file.write(line + "\n")
                 
-                # Wait before next poll
-                time.sleep(5)
-                attempt += 1
-                print(f"  Waiting for transcription... ({attempt * 5}s)")
-            
-            print("Error: Transcription timeout")
-            return None
-            
+                print("\n" + "="*60)
+                print(f"✅ Transcription saved to: {output_path}")
+                return output_path
+                
         except Exception as e:
-            print(f"Error transcribing with AssemblyAI: {e}")
+            print(f"Error transcribing with Deepgram: {e}")
             return None
     
-    def transcribe_audio_google(self, audio_filepath):
-        """Alternative: Transcribe using Google Speech-to-Text API"""
-        try:
-            from google.cloud import speech
-            
-            client = speech.SpeechClient()
-            
-            with open(audio_filepath, 'rb') as audio_file:
-                content = audio_file.read()
-            
-            audio = speech.RecognitionAudio(content=content)
-            config = speech.RecognitionConfig(
-                encoding=speech.RecognitionConfig.AudioEncoding.MP3,
-                language_code='hi-IN',  # Hindi
-                alternative_language_codes=['en-IN'],  # English fallback
-                enable_automatic_punctuation=True,
-            )
-            
-            response = client.recognize(config=config, audio=audio)
-            
-            transcript = ""
-            for result in response.results:
-                transcript += result.alternatives[0].transcript + " "
-            
-            return transcript.strip()
-        except Exception as e:
-            print(f"Error transcribing with Google: {e}")
-            return None
-    
-    def save_transcription(self, call_sid, from_number, to_number, 
-                          direction, duration, timestamp, transcription):
-        """Save transcription to a text file with metadata"""
-        filename = f"{call_sid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        filepath = self.transcriptions_dir / filename
+    def save_call_metadata(self, call_sid, from_number, to_number, 
+                          direction, duration, timestamp):
+        """Save call metadata to a JSON file"""
+        filename = f"{call_sid}_metadata.json"
+        filepath = self.recordings_dir / filename
+        
+        metadata = {
+            'call_sid': call_sid,
+            'from': from_number,
+            'to': to_number,
+            'direction': direction,
+            'duration': duration,
+            'timestamp': timestamp,
+            'downloaded_at': datetime.now().isoformat()
+        }
         
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
-                f.write("="*80 + "\n")
-                f.write("CALL RECORDING TRANSCRIPTION\n")
-                f.write("="*80 + "\n\n")
-                f.write(f"Call SID: {call_sid}\n")
-                f.write(f"From: {from_number}\n")
-                f.write(f"To: {to_number}\n")
-                f.write(f"Direction: {direction}\n")
-                f.write(f"Duration: {duration} seconds\n")
-                f.write(f"Timestamp: {timestamp}\n")
-                f.write("\n" + "="*80 + "\n")
-                f.write("TRANSCRIPTION:\n")
-                f.write("="*80 + "\n\n")
-                f.write(transcription)
-                f.write("\n\n" + "="*80 + "\n")
+                json.dump(metadata, f, indent=2)
             
-            print(f"✓ Saved transcription: {filename}")
+            print(f"✓ Saved metadata: {filename}")
             return filepath
         except Exception as e:
-            print(f"Error saving transcription: {e}")
+            print(f"Error saving metadata: {e}")
             return None
     
-    def format_conversation(self, transcription, from_number, to_number):
-        """
-        Format transcription with Person A and Person B labels
-        This is a simple version - for better speaker diarization,
-        use advanced APIs like AWS Transcribe or Google Speech Diarization
-        """
-        lines = transcription.split('.')
-        formatted = ""
-        
-        for i, line in enumerate(lines):
-            line = line.strip()
-            if line:
-                # Simple alternating pattern (not accurate without diarization)
-                speaker = "Person A" if i % 2 == 0 else "Person B"
-                formatted += f"{speaker}: {line}.\n\n"
-        
-        return formatted
-    
-    def process_call(self, call):
-        
-        """Process a single call: download, transcribe, and save"""
+    async def process_call_async(self, call):
+        """Process a single call: download recording, transcribe, and save metadata"""
         call_sid = call.get('Sid')
         
-        # Fix: Handle both string and dict formats
+        # Handle both string and dict formats
         from_field = call.get('From', 'Unknown')
         to_field = call.get('To', 'Unknown')
         
@@ -282,33 +241,26 @@ class ExotelCallRecorder:
         if not audio_file:
             return False
         
-        # Transcribe
-        print("Transcribing audio with AssemblyAI...")
-        transcription = self.transcribe_audio_whisper(audio_file)
-        
-        if not transcription:
+        # Transcribe using Deepgram
+        transcription_file = await self.transcribe_audio_deepgram(audio_file, call_sid)
+        if not transcription_file:
             print("⊘ Transcription failed")
             return False
         
-        # Format with speaker labels (only if not already formatted by AssemblyAI)
-        if "Person A:" in transcription or "Person B:" in transcription:
-            # Already formatted with speaker labels
-            formatted_transcription = transcription
-        else:
-            # Format with simple alternating pattern
-            formatted_transcription = self.format_conversation(
-                transcription, from_number, to_number
-            )
-        
-        # Save transcription
-        self.save_transcription(
+        # Save metadata
+        self.save_call_metadata(
             call_sid, from_number, to_number,
-            direction, duration, date_created,
-            formatted_transcription
+            direction, duration, date_created
         )
         
-        print(f"✓ Successfully processed call {call_sid}\n")
+        print(f"✓ Successfully processed call {call_sid}")
+        print(f"Recording saved at: {audio_file}")
+        print(f"Transcription saved at: {transcription_file}\n")
         return True
+    
+    def process_call(self, call):
+        """Synchronous wrapper for async process_call_async"""
+        return asyncio.run(self.process_call_async(call))
     
     def run(self, hours=24, continuous=False, interval=300):
         """
@@ -320,7 +272,7 @@ class ExotelCallRecorder:
             interval: Seconds between checks (if continuous)
         """
         print("="*80)
-        print("EXOTEL CALL RECORDER & TRANSCRIBER")
+        print("EXOTEL CALL RECORDER & TRANSCRIBER (DEEPGRAM)")
         print("="*80)
         print(f"Recordings saved to: {self.recordings_dir.absolute()}")
         print(f"Transcriptions saved to: {self.transcriptions_dir.absolute()}")
@@ -339,7 +291,6 @@ class ExotelCallRecorder:
                 print("No calls found")
             else:
                 # Sort calls by date (most recent first) and process only the last call
-                # Assuming calls are returned with DateCreated field
                 calls_sorted = sorted(calls, key=lambda x: x.get('DateCreated', ''), reverse=True)
                 last_call = calls_sorted[0]
                 call_sid = last_call.get('Sid')
@@ -367,9 +318,9 @@ def main():
     # Initialize recorder
     recorder = ExotelCallRecorder()
     
-    # Run in continuous mode (checks every 5 minutes)
-    # Set continuous=False to run once
-    recorder.run(hours=24, continuous=True, interval=300)
+    # Run once to fetch and transcribe recordings from last 24 hours
+    # Set continuous=True to run in loop mode
+    recorder.run(hours=24, continuous=False, interval=300)
 
 
 if __name__ == "__main__":
