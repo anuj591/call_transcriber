@@ -1,0 +1,10 @@
+# Dependencies for call_recorder.py
+
+# HTTP requests for Exotel API
+requests>=2.31.0
+
+# Environment variable management
+python-dotenv>=1.0.0
+
+# Deepgram transcription API
+deepgram>=3.0.0
